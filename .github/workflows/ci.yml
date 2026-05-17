@@ -1,14 +1,16 @@
-name: CI — Lint, Syntax Check & Docker Build
+name: CI/CD — Edge-Cloud Demo
 
 on:
   push:
     branches: [main, develop]
+    tags:
+      - "v*.*.*"
   pull_request:
     branches: [main, develop]
 
 jobs:
   # ─────────────────────────────────────────────
-  # Job 1: Python syntax & import checks
+  # Job 1: Python syntax & lint check
   # ─────────────────────────────────────────────
   lint:
     name: Python Lint & Syntax Check
@@ -27,33 +29,46 @@ jobs:
         run: pip install pyflakes==3.2.0 ruff==0.4.4
 
       - name: Syntax check — edge
-        run: python -m py_compile edge/models.py edge/edge_infer.py edge/edge_api.py edge/offload_manager.py edge/logger.py edge/run_cloud_only.py edge/run_edge_only.py edge/run_edge_cloud.py edge/metrics.py
+        run: |
+          python -m py_compile edge/models.py
+          python -m py_compile edge/edge_infer.py
+          python -m py_compile edge/edge_api.py
+          python -m py_compile edge/offload_manager.py
+          python -m py_compile edge/logger.py
+          python -m py_compile edge/run_cloud_only.py
+          python -m py_compile edge/run_edge_only.py
+          python -m py_compile edge/run_edge_cloud.py
+          python -m py_compile edge/metrics.py
 
-      - name: Syntax check — cloud
-        run: python -m py_compile cloud/cloud_api.py
+      - name: Syntax check — cloud & dashboard
+        run: |
+          python -m py_compile cloud/cloud_api.py
+          python -m py_compile dashboard/app.py
 
-      - name: Syntax check — dashboard
-        run: python -m py_compile dashboard/app.py
-
-      - name: Ruff lint — edge
-        run: ruff check edge/ --select E,W,F --ignore E501
-        continue-on-error: true
-
-      - name: Ruff lint — cloud
-        run: ruff check cloud/ --select E,W,F --ignore E501
-        continue-on-error: true
-
-      - name: Ruff lint — dashboard
-        run: ruff check dashboard/ --select E,W,F --ignore E501
+      - name: Ruff lint
+        run: ruff check edge/ cloud/ dashboard/ --select E,W,F --ignore E501
         continue-on-error: true
 
   # ─────────────────────────────────────────────
-  # Job 2: Build Docker images
+  # Job 2: Build & Push Docker images to GHCR
   # ─────────────────────────────────────────────
-  docker-build:
-    name: Docker Build
+  build-and-push:
+    name: Build & Push — ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: lint
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - service: cloud-node
+            context: ./cloud
+          - service: edge-node
+            context: ./edge
+          - service: dashboard
+            context: ./dashboard
 
     steps:
       - name: Checkout code
@@ -62,58 +77,78 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build cloud_node image
-        uses: docker/build-push-action@v5
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          context: ./cloud
-          push: false
-          tags: edge-cloud/cloud_node:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build edge_node image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./edge
-          push: false
-          tags: edge-cloud/edge_node:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Set Docker tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "develop" ]; then
+            echo "TAG=latest" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "TAG=main" >> $GITHUB_ENV
+          else
+            echo "TAG=pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          fi
 
-      - name: Build dashboard image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./dashboard
-          push: false
-          tags: edge-cloud/dashboard:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build
+        run: |
+          docker build \
+            -t ghcr.io/cygnussec/${{ matrix.service }}:${TAG} \
+            ${{ matrix.context }}
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push ghcr.io/cygnussec/${{ matrix.service }}:${TAG}
 
   # ─────────────────────────────────────────────
-  # Job 3: Smoke test — cloud API health check
+  # Job 3: Smoke test — Cloud API health check
   # ─────────────────────────────────────────────
   smoke-test:
     name: Smoke Test — Cloud API
     runs-on: ubuntu-latest
-    needs: docker-build
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Start cloud_node
+      - name: Set Docker tag
         run: |
-          docker compose up -d cloud_node
-          echo "Waiting for cloud_node to become healthy..."
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "develop" ]; then
+            echo "TAG=latest" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "TAG=main" >> $GITHUB_ENV
+          fi
 
-      - name: Wait for cloud_node health
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and start cloud_node
+        run: |
+          docker run -d \
+            --name cloud_node \
+            -p 8000:8000 \
+            ghcr.io/cygnussec/cloud-node:${TAG}
+
+      - name: Wait for cloud_node to be healthy
         run: |
           for i in $(seq 1 24); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' cloud_node 2>/dev/null || echo "starting")
-            echo "Attempt $i/24 — status: $STATUS"
+            STATUS=$(curl -sf http://localhost:8000/health 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+            echo "Attempt $i/24 — status: ${STATUS}"
             if [ "$STATUS" = "healthy" ]; then
               echo "cloud_node is healthy"
               exit 0
@@ -124,24 +159,21 @@ jobs:
           docker logs cloud_node
           exit 1
 
-      - name: Test GET /health endpoint
+      - name: Test GET /health
         run: |
           RESPONSE=$(curl -sf http://localhost:8000/health)
-          echo "Health response: $RESPONSE"
+          echo "Response: $RESPONSE"
           echo "$RESPONSE" | python3 -c "
           import sys, json
-          data = json.load(sys.stdin)
-          assert data['status'] == 'healthy', f'Expected healthy, got: {data}'
-          assert data['model_loaded'] == True, f'Model not loaded: {data}'
+          d = json.load(sys.stdin)
+          assert d['status'] == 'healthy', f'Expected healthy: {d}'
+          assert d['model_loaded'] == True, f'Model not loaded: {d}'
           print('Health check passed')
           "
 
-      - name: Test POST /predict with sample image
+      - name: Test POST /predict
         run: |
-          # Create a minimal valid JPEG (1x1 white pixel)
           python3 -c "
-          import struct, zlib, base64
-          # Minimal 1x1 white JPEG
           jpeg = bytes([
             0xFF,0xD8,0xFF,0xE0,0x00,0x10,0x4A,0x46,0x49,0x46,0x00,0x01,
             0x01,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0xFF,0xDB,0x00,0x43,
@@ -154,42 +186,26 @@ jobs:
             0x00,0x01,0x01,0x01,0x11,0x00,0xFF,0xC4,0x00,0x1F,0x00,0x00,
             0x01,0x05,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,
             0x00,0x00,0x00,0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
-            0x09,0x0A,0x0B,0xFF,0xC4,0x00,0xB5,0x10,0x00,0x02,0x01,0x03,
-            0x03,0x02,0x04,0x03,0x05,0x05,0x04,0x04,0x00,0x00,0x01,0x7D,
-            0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,
-            0x13,0x51,0x61,0x07,0x22,0x71,0x14,0x32,0x81,0x91,0xA1,0x08,
-            0x23,0x42,0xB1,0xC1,0x15,0x52,0xD1,0xF0,0x24,0x33,0x62,0x72,
-            0x82,0x09,0x0A,0x16,0x17,0x18,0x19,0x1A,0x25,0x26,0x27,0x28,
-            0x29,0x2A,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,
-            0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,0x59,
-            0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,
-            0x76,0x77,0x78,0x79,0x7A,0x83,0x84,0x85,0x86,0x87,0x88,0x89,
-            0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,
-            0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6,
-            0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,
-            0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xE1,0xE2,
-            0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF1,0xF2,0xF3,0xF4,
-            0xF5,0xF6,0xF7,0xF8,0xF9,0xFA,0xFF,0xDA,0x00,0x08,0x01,0x01,
-            0x00,0x00,0x3F,0x00,0xFB,0xD2,0x8A,0x28,0x03,0xFF,0xD9
+            0x09,0x0A,0x0B,0xFF,0xDA,0x00,0x08,0x01,0x01,0x00,0x00,0x3F,
+            0x00,0xFB,0xD2,0x8A,0x28,0x03,0xFF,0xD9
           ])
           with open('/tmp/test.jpg', 'wb') as f:
               f.write(jpeg)
-          print('Test image created')
           "
           RESPONSE=$(curl -sf -X POST http://localhost:8000/predict \
             -F "file=@/tmp/test.jpg;type=image/jpeg")
-          echo "Predict response: $RESPONSE"
+          echo "Response: $RESPONSE"
           echo "$RESPONSE" | python3 -c "
           import sys, json
-          data = json.load(sys.stdin)
-          assert 'objects' in data, f'Missing objects: {data}'
-          assert 'confidence' in data, f'Missing confidence: {data}'
-          assert 'object_count' in data, f'Missing object_count: {data}'
-          assert 'latency_ms' in data, f'Missing latency_ms: {data}'
-          assert data['latency_ms'] > 0, f'latency_ms should be > 0: {data}'
-          print(f'Predict check passed — {data[\"object_count\"]} objects detected')
+          d = json.load(sys.stdin)
+          assert 'objects' in d
+          assert 'confidence' in d
+          assert 'object_count' in d
+          assert 'latency_ms' in d
+          assert d['latency_ms'] > 0
+          print(f'Predict passed — {d[\"object_count\"]} objects, latency {d[\"latency_ms\"]:.1f}ms')
           "
 
       - name: Tear down
         if: always()
-        run: docker compose down
+        run: docker rm -f cloud_node || true

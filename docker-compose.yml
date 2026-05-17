@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   cloud_node:
-    build: ./cloud
+    image: ghcr.io/cygnussec/cloud-node:latest
     container_name: cloud_node
     ports:
       - "8000:8000"
@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
 
   edge_node:
-    build: ./edge
+    image: ghcr.io/cygnussec/edge-node:latest
     container_name: edge_node
     ports:
       - "8001:8001"
@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    build: ./dashboard
+    image: ghcr.io/cygnussec/dashboard:latest
     container_name: dashboard
     ports:
       - "8501:8501"
