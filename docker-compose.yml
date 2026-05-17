@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  cloud_node:
+    build: ./cloud
+    container_name: cloud_node
+    ports:
+      - "8000:8000"
+    networks:
+      - edge_cloud_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+
+  edge_node:
+    build: ./edge
+    container_name: edge_node
+    ports:
+      - "8001:8001"
+    environment:
+      - CLOUD_URL=http://cloud_node:8000
+      - CONFIDENCE_THRESHOLD=0.6
+      - DATASET_DIR=/app/dataset
+      - OUTPUT_DIR=/app/results
+    volumes:
+      - ./dataset:/app/dataset:ro
+      - ./results:/app/results:rw
+    networks:
+      - edge_cloud_net
+    depends_on:
+      cloud_node:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - CLOUD_URL=http://cloud_node:8000
+      - EDGE_URL=http://edge_node:8001
+      - CONFIDENCE_THRESHOLD=0.6
+      - RESULTS_DIR=/app/results
+      - DATASET_DIR=/app/dataset
+    volumes:
+      - ./results:/app/results:ro
+      - ./dataset:/app/dataset:ro
+    networks:
+      - edge_cloud_net
+    depends_on:
+      - cloud_node
+      - edge_node
+    restart: unless-stopped
+
+networks:
+  edge_cloud_net:
+    driver: bridge
