@@ -619,14 +619,15 @@ def main() -> None:
 
     st.session_state.threshold = st.sidebar.slider(
         "Offload Threshold",
-        min_value=0.10,
-        max_value=0.99,
+        min_value=0.01,
+        max_value=1.0,
         value=st.session_state.threshold,
-        step=0.05,
+        step=0.01,
         help=(
-            "Images with edge confidence BELOW this value are offloaded to Cloud.\n\n"
-            "↑ Higher → more offloading → better accuracy, more bandwidth\n"
-            "↓ Lower  → less offloading → faster, less bandwidth"
+            "Confidence threshold for offload decision (0.01–1.0).\n\n"
+            "• threshold = 0.01 → almost never offload (edge handles everything)\n"
+            "• threshold = 1.0  → always offload (cloud handles everything)\n"
+            "• threshold = 0.6  → default balanced setting"
         ),
     )
     threshold = st.session_state.threshold
@@ -654,14 +655,18 @@ def main() -> None:
     offload_strategy = st.session_state.offload_strategy
 
     # Show threshold impact hint
-    if threshold <= 0.3:
-        st.sidebar.caption("🟢 Very low — almost everything stays at edge")
-    elif threshold <= 0.6:
-        st.sidebar.caption("🟡 Balanced — default research setting")
-    elif threshold <= 0.8:
+    if threshold <= 0.1:
+        st.sidebar.caption("🟢 Very low — edge handles almost everything (≈ edge-only)")
+    elif threshold <= 0.5:
+        st.sidebar.caption("🟡 Low — most images stay at edge")
+    elif threshold <= 0.7:
+        st.sidebar.caption("🟡 Balanced — default research setting (0.6)")
+    elif threshold <= 0.9:
         st.sidebar.caption("🟠 High — more images offloaded to cloud")
-    else:
+    elif threshold < 1.0:
         st.sidebar.caption("🔴 Very high — most images offloaded to cloud")
+    else:
+        st.sidebar.caption("🔴 Maximum — always offload (≈ cloud-only)")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
