@@ -167,20 +167,12 @@ def _should_keep_at_edge(edge_result: dict, threshold: float, threshold_avg: flo
 def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
     st.header("🖼️ Single Image Analysis")
 
-    # Use a key in session_state to allow resetting the file uploader
-    if "uploader_key" not in st.session_state:
-        st.session_state.uploader_key = 0
-
-    def _reset_uploader():
-        st.session_state.uploader_key += 1
-
     col1, col2 = st.columns([2, 1])
     with col1:
         uploaded = st.file_uploader(
             "Upload image (JPEG, PNG, BMP)",
             type=["jpg", "jpeg", "png", "bmp"],
-            key=f"file_uploader_{st.session_state.uploader_key}",
-            on_change=None,
+            key="single_image_uploader",
             accept_multiple_files=False,
         )
     with col2:
@@ -194,11 +186,6 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: fl
                 f"Current thresholds: max ≥ **{threshold:.2f}**, avg ≥ **{threshold_avg:.2f}**, objects ≤ **{object_threshold}**\n\n"
                 "Adjust in sidebar ←"
             )
-
-        # Clear button to reset uploader without error
-        if st.button("🗑️ Clear image"):
-            _reset_uploader()
-            st.rerun()
 
     if uploaded is None:
         st.info("Please upload an image to start analysis.")
@@ -256,7 +243,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: fl
     annotated = draw_bounding_boxes(image_bgr, result.get("objects", []))
     annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
 
-    st.image(annotated_rgb, caption="Detection result", use_column_width=True)
+    st.image(annotated_rgb, caption="Detection result", use_container_width=True)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Processed at", processing_place)
@@ -328,7 +315,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: fl
 
             with col_edge:
                 st.markdown("#### 📱 Edge (YOLOv8n) — *not used*")
-                st.image(edge_rgb, use_column_width=True)
+                st.image(edge_rgb, use_container_width=True)
                 e_conf = edge_result_saved.get("confidence", 0)
                 e_count = edge_result_saved.get("object_count", 0)
                 e_lat = edge_result_saved.get("latency_ms", 0)
@@ -342,7 +329,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: fl
 
             with col_cloud:
                 st.markdown("#### ☁️ Cloud (YOLOv8m) — *final result*")
-                st.image(cloud_rgb, use_column_width=True)
+                st.image(cloud_rgb, use_container_width=True)
                 c_conf = result.get("confidence", 0)
                 c_count = result.get("object_count", 0)
                 c_lat = result.get("latency_ms", 0)
@@ -634,7 +621,7 @@ def page_video(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0
         if result:
             annotated = draw_bounding_boxes(frame, result.get("objects", []))
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(annotated_rgb, caption=f"Frame {frame_idx}", use_column_width=True)
+            frame_placeholder.image(annotated_rgb, caption=f"Frame {frame_idx}", use_container_width=True)
             info_placeholder.write(
                 f"**Frame {frame_idx}** | Processed at: {place} | "
                 f"Confidence: {result.get('confidence', 0):.3f} | "
@@ -700,7 +687,7 @@ def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: floa
                 m = metrics
 
                 annotated = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
-                st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="Edge result", use_column_width=True)
+                st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="Edge result", use_container_width=True)
 
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Max confidence", f"{m['max_conf']:.3f}")
@@ -756,7 +743,7 @@ def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: floa
                 with col_e:
                     st.markdown("#### 📱 Edge (YOLOv8n)")
                     ann_e = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
-                    st.image(cv2.cvtColor(ann_e, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    st.image(cv2.cvtColor(ann_e, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.metric("Max confidence", f"{m['max_conf']:.3f}")
                     st.metric("Avg confidence", f"{m['avg_conf']:.3f}")
                     st.metric("Objects", m['object_count'])
@@ -765,7 +752,7 @@ def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: floa
                 with col_c:
                     st.markdown("#### ☁️ Cloud (YOLOv8m)")
                     ann_c = draw_bounding_boxes(img_bgr, cloud_result.get("objects", []))
-                    st.image(cv2.cvtColor(ann_c, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    st.image(cv2.cvtColor(ann_c, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.metric("Max confidence", f"{cloud_result.get('confidence', 0):.3f}",
                               delta=f"+{cloud_result.get('confidence', 0) - m['max_conf']:.3f}")
                     st.metric("Objects", cloud_result.get("object_count", 0),
@@ -849,15 +836,15 @@ def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: floa
                 with col1:
                     st.markdown("**Cloud-Only**")
                     ann = draw_bounding_boxes(img_bgr, cloud_result.get("objects", []))
-                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with col2:
                     st.markdown("**Edge-Only**")
                     ann = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
-                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with col3:
                     st.markdown(f"**Edge-Cloud** → {ec_place}")
                     ann = draw_bounding_boxes(img_bgr, ec_result.get("objects", []))
-                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 # Key insight
                 bw_savings = (1 - ec_upload / len(img_bytes)) * 100 if len(img_bytes) > 0 else 0
