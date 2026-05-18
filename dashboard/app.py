@@ -132,7 +132,7 @@ def call_edge(image_bytes: bytes, filename: str = "image.jpg") -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def page_single_image():
+def page_single_image(threshold: float = CONFIDENCE_THRESHOLD):
     st.header("🖼️ Single Image Analysis")
 
     col1, col2 = st.columns([2, 1])
@@ -147,6 +147,8 @@ def page_single_image():
             options=["edge_cloud", "cloud_only", "edge_only"],
             format_func=lambda x: SCENARIO_LABELS[x],
         )
+        if scenario == "edge_cloud":
+            st.info(f"Current threshold: **{threshold:.2f}**\n\nAdjust in sidebar ←")
 
     if uploaded is None:
         st.info("Please upload an image to start analysis.")
@@ -176,10 +178,13 @@ def page_single_image():
 
         else:  # edge_cloud
             edge_result = call_edge(image_bytes)
-            if edge_result and edge_result["confidence"] >= CONFIDENCE_THRESHOLD:
+            if edge_result and edge_result["confidence"] >= threshold:
                 result = edge_result
                 processing_place = "📱 Edge"
+                st.info(f"Confidence {edge_result['confidence']:.3f} ≥ threshold {threshold:.2f} → processed at **Edge**")
             else:
+                edge_conf = edge_result["confidence"] if edge_result else 0.0
+                st.warning(f"Confidence {edge_conf:.3f} < threshold {threshold:.2f} → offloading to **Cloud**")
                 result = call_cloud(image_bytes, uploaded.name)
                 if result:
                     processing_place = "☁️ Cloud"
@@ -201,6 +206,21 @@ def page_single_image():
 
     if result.get("detected_classes"):
         st.write("**Detected classes:**", ", ".join(result["detected_classes"]))
+
+    # Show edge-cloud decision explanation
+    if scenario == "edge_cloud":
+        conf = result.get("confidence", 0)
+        st.markdown("---")
+        st.markdown("**Edge-Cloud Decision Logic:**")
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Edge confidence", f"{conf:.3f}")
+        col_b.metric("Threshold", f"{threshold:.2f}")
+        if processing_place.startswith("📱"):
+            col_c.metric("Decision", "✅ Keep at Edge", delta="No upload (0 bytes)")
+            st.success(f"Confidence {conf:.3f} ≥ threshold {threshold:.2f} → Edge result accepted. Bandwidth saved.")
+        else:
+            col_c.metric("Decision", "☁️ Offload to Cloud", delta=f"+{len(image_bytes):,} bytes uploaded")
+            st.warning(f"Confidence {conf:.3f} < threshold {threshold:.2f} → Offloaded to Cloud for better accuracy.")
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +430,7 @@ def page_comparison():
 # ---------------------------------------------------------------------------
 
 
-def page_video():
+def page_video(threshold: float = CONFIDENCE_THRESHOLD):
     st.header("🎬 Video Analysis")
     st.info(
         f"Upload a video file (MP4, AVI). Each frame will be processed using the "
@@ -467,7 +487,7 @@ def page_video():
         frame_bytes = buf.tobytes()
 
         edge_result = call_edge(frame_bytes)
-        if edge_result and edge_result["confidence"] >= CONFIDENCE_THRESHOLD:
+        if edge_result and edge_result["confidence"] >= threshold:
             result = edge_result
             place = "📱 Edge"
         else:
@@ -508,6 +528,7 @@ def main() -> None:
     st.title("🌐 Edge-Cloud Computing Demo")
     st.caption("Multimedia transmission and large-scale image semantic analysis via Edge-Cloud architecture")
 
+    # ── Sidebar navigation ──────────────────────────────────────────────────
     page = st.sidebar.radio(
         "Navigation",
         options=["single_image", "comparison", "video"],
@@ -519,16 +540,47 @@ def main() -> None:
     )
 
     st.sidebar.markdown("---")
+
+    # ── Dynamic confidence threshold ────────────────────────────────────────
+    st.sidebar.markdown("### ⚙️ Edge-Cloud Settings")
+    if "threshold" not in st.session_state:
+        st.session_state.threshold = CONFIDENCE_THRESHOLD
+
+    st.session_state.threshold = st.sidebar.slider(
+        "Offload Threshold",
+        min_value=0.10,
+        max_value=0.99,
+        value=st.session_state.threshold,
+        step=0.05,
+        help=(
+            "Images with edge confidence BELOW this value are offloaded to Cloud.\n\n"
+            "↑ Higher → more offloading → better accuracy, more bandwidth\n"
+            "↓ Lower  → less offloading → faster, less bandwidth"
+        ),
+    )
+
+    threshold = st.session_state.threshold
+
+    # Show threshold impact hint
+    if threshold <= 0.3:
+        st.sidebar.caption("🟢 Very low — almost everything stays at edge")
+    elif threshold <= 0.6:
+        st.sidebar.caption("🟡 Balanced — default research setting")
+    elif threshold <= 0.8:
+        st.sidebar.caption("🟠 High — more images offloaded to cloud")
+    else:
+        st.sidebar.caption("🔴 Very high — most images offloaded to cloud")
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
     st.sidebar.markdown(f"**Edge URL:** `{EDGE_URL}`")
-    st.sidebar.markdown(f"**Threshold:** `{CONFIDENCE_THRESHOLD}`")
 
     if page == "single_image":
-        page_single_image()
+        page_single_image(threshold)
     elif page == "comparison":
         page_comparison()
     else:
-        page_video()
+        page_video(threshold)
 
 
 if __name__ == "__main__":
