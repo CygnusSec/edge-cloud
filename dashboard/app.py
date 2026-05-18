@@ -149,11 +149,16 @@ def _compute_offload_confidence(result: dict, strategy: str) -> float:
 def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy: str = "max"):
     st.header("🖼️ Single Image Analysis")
 
+    # Use a key in session_state to allow resetting the file uploader
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
     col1, col2 = st.columns([2, 1])
     with col1:
         uploaded = st.file_uploader(
             "Upload image (JPEG, PNG, BMP)",
             type=["jpg", "jpeg", "png", "bmp"],
+            key=f"file_uploader_{st.session_state.uploader_key}",
         )
     with col2:
         scenario = st.selectbox(
@@ -163,6 +168,11 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
         )
         if scenario == "edge_cloud":
             st.info(f"Current threshold: **{threshold:.2f}**\n\nAdjust in sidebar ←")
+
+        # Clear button to reset uploader without error
+        if st.button("🗑️ Clear image"):
+            st.session_state.uploader_key += 1
+            st.rerun()
 
     if uploaded is None:
         st.info("Please upload an image to start analysis.")
