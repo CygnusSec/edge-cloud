@@ -179,6 +179,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
     result = None
     processing_place = "—"
     edge_conf_used = None  # confidence value used for offload decision
+    edge_result_saved = None  # save edge result for comparison display
 
     with st.spinner("Analyzing..."):
         if scenario == "cloud_only":
@@ -194,6 +195,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
         else:  # edge_cloud
             edge_result = call_edge(image_bytes)
             if edge_result:
+                edge_result_saved = edge_result
                 edge_conf_used = _compute_offload_confidence(edge_result, offload_strategy)
                 strategy_label = {"max": "max", "avg": "avg", "min": "min"}[offload_strategy]
                 if edge_conf_used >= threshold:
@@ -246,6 +248,50 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
                 f"Edge confidence {edge_conf_used:.3f} < threshold {threshold:.2f} → Offloaded to Cloud.\n\n"
                 f"Cloud result: confidence **{final_conf:.3f}** ({'+' if final_conf > edge_conf_used else ''}{final_conf - edge_conf_used:.3f} vs edge)"
             )
+
+        # ── Side-by-side Edge vs Cloud comparison ──────────────────────────
+        if edge_result_saved is not None and result is not None and processing_place.startswith("☁️"):
+            st.markdown("---")
+            st.markdown("### 🔄 Edge vs Cloud — Side-by-Side Comparison")
+            st.caption("Both models ran on the same image. Edge result triggered offload; Cloud result is used as final output.")
+
+            col_edge, col_cloud = st.columns(2)
+
+            # Draw edge bounding boxes
+            edge_annotated = draw_bounding_boxes(image_bgr, edge_result_saved.get("objects", []))
+            edge_rgb = cv2.cvtColor(edge_annotated, cv2.COLOR_BGR2RGB)
+
+            # Draw cloud bounding boxes
+            cloud_annotated = draw_bounding_boxes(image_bgr, result.get("objects", []))
+            cloud_rgb = cv2.cvtColor(cloud_annotated, cv2.COLOR_BGR2RGB)
+
+            with col_edge:
+                st.markdown("#### 📱 Edge (YOLOv8n) — *not used*")
+                st.image(edge_rgb, use_column_width=True)
+                e_conf = edge_result_saved.get("confidence", 0)
+                e_count = edge_result_saved.get("object_count", 0)
+                e_lat = edge_result_saved.get("latency_ms", 0)
+                e_classes = edge_result_saved.get("detected_classes", [])
+                st.metric("Confidence", f"{e_conf:.3f}", delta=f"{e_conf - final_conf:.3f} vs cloud")
+                st.metric("Objects", e_count)
+                st.metric("Latency", f"{e_lat:.1f} ms")
+                st.metric("Upload", "0 bytes")
+                if e_classes:
+                    st.caption(f"Classes: {', '.join(e_classes)}")
+
+            with col_cloud:
+                st.markdown("#### ☁️ Cloud (YOLOv8m) — *final result*")
+                st.image(cloud_rgb, use_column_width=True)
+                c_conf = result.get("confidence", 0)
+                c_count = result.get("object_count", 0)
+                c_lat = result.get("latency_ms", 0)
+                c_classes = result.get("detected_classes", [])
+                st.metric("Confidence", f"{c_conf:.3f}", delta=f"+{c_conf - e_conf:.3f} vs edge")
+                st.metric("Objects", c_count, delta=f"+{c_count - e_count}" if c_count > e_count else str(c_count - e_count))
+                st.metric("Latency", f"{c_lat:.1f} ms")
+                st.metric("Upload", f"{len(image_bytes):,} bytes")
+                if c_classes:
+                    st.caption(f"Classes: {', '.join(c_classes)}")
 
 
 # ---------------------------------------------------------------------------
