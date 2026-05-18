@@ -153,12 +153,17 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = 0
 
+    def _reset_uploader():
+        st.session_state.uploader_key += 1
+
     col1, col2 = st.columns([2, 1])
     with col1:
         uploaded = st.file_uploader(
             "Upload image (JPEG, PNG, BMP)",
             type=["jpg", "jpeg", "png", "bmp"],
             key=f"file_uploader_{st.session_state.uploader_key}",
+            on_change=None,
+            accept_multiple_files=False,
         )
     with col2:
         scenario = st.selectbox(
@@ -171,7 +176,7 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
 
         # Clear button to reset uploader without error
         if st.button("🗑️ Clear image"):
-            st.session_state.uploader_key += 1
+            _reset_uploader()
             st.rerun()
 
     if uploaded is None:
