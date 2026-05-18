@@ -132,21 +132,39 @@ def call_edge(image_bytes: bytes, filename: str = "image.jpg") -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _compute_offload_confidence(result: dict, strategy: str) -> float:
-    """Compute the confidence value used for offload decision based on strategy."""
-    objects = result.get("objects", [])
-    if not objects:
-        return 0.0
-    confs = [o.get("confidence", 0.0) for o in objects]
-    if strategy == "max":
-        return max(confs)
-    elif strategy == "avg":
-        return sum(confs) / len(confs)
-    else:  # min
-        return min(confs)
+def _should_keep_at_edge(edge_result: dict, threshold: float, threshold_avg: float, object_threshold: int) -> tuple[bool, dict]:
+    """
+    Combined offload decision:
+      Keep at Edge if ALL three conditions are met:
+        1. max_confidence >= threshold
+        2. average_confidence >= threshold_avg
+        3. object_count <= object_threshold
+    Returns (keep_at_edge, metrics_dict)
+    """
+    objects = edge_result.get("objects", [])
+    object_count = edge_result.get("object_count", len(objects))
+    confs = [o.get("confidence", 0.0) for o in objects] if objects else []
+
+    max_conf = max(confs) if confs else 0.0
+    avg_conf = sum(confs) / len(confs) if confs else 0.0
+
+    cond1 = max_conf >= threshold
+    cond2 = avg_conf >= threshold_avg
+    cond3 = object_count <= object_threshold
+
+    keep = cond1 and cond2 and cond3
+
+    return keep, {
+        "max_conf": max_conf,
+        "avg_conf": avg_conf,
+        "object_count": object_count,
+        "cond1": cond1,
+        "cond2": cond2,
+        "cond3": cond3,
+    }
 
 
-def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy: str = "max"):
+def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
     st.header("🖼️ Single Image Analysis")
 
     # Use a key in session_state to allow resetting the file uploader
@@ -172,7 +190,10 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
             format_func=lambda x: SCENARIO_LABELS[x],
         )
         if scenario == "edge_cloud":
-            st.info(f"Current threshold: **{threshold:.2f}**\n\nAdjust in sidebar ←")
+            st.info(
+                f"Current thresholds: max ≥ **{threshold:.2f}**, avg ≥ **{threshold_avg:.2f}**, objects ≤ **{object_threshold}**\n\n"
+                "Adjust in sidebar ←"
+            )
 
         # Clear button to reset uploader without error
         if st.button("🗑️ Clear image"):
@@ -193,8 +214,9 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
 
     result = None
     processing_place = "—"
-    edge_conf_used = None  # confidence value used for offload decision
-    edge_result_saved = None  # save edge result for comparison display
+    edge_conf_used = None
+    edge_result_saved = None
+    decision_metrics = None
 
     with st.spinner("Analyzing..."):
         if scenario == "cloud_only":
@@ -211,14 +233,14 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
             edge_result = call_edge(image_bytes)
             if edge_result:
                 edge_result_saved = edge_result
-                edge_conf_used = _compute_offload_confidence(edge_result, offload_strategy)
-                strategy_label = {"max": "max", "avg": "avg", "min": "min"}[offload_strategy]
-                if edge_conf_used >= threshold:
+                keep, metrics = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+                decision_metrics = metrics
+                edge_conf_used = metrics["max_conf"]
+
+                if keep:
                     result = edge_result
                     processing_place = "📱 Edge"
-                    st.info(f"{strategy_label} confidence {edge_conf_used:.3f} ≥ threshold {threshold:.2f} → processed at **Edge**")
                 else:
-                    st.warning(f"{strategy_label} confidence {edge_conf_used:.3f} < threshold {threshold:.2f} → offloading to **Cloud**")
                     result = call_cloud(image_bytes, uploaded.name)
                     if result:
                         processing_place = "☁️ Cloud"
@@ -246,22 +268,46 @@ def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy:
         st.write("**Detected classes:**", ", ".join(result["detected_classes"]))
 
     # Show edge-cloud decision explanation
-    if scenario == "edge_cloud" and edge_conf_used is not None:
+    if scenario == "edge_cloud" and decision_metrics is not None:
         final_conf = result.get("confidence", 0) if result else 0
+        m = decision_metrics
         st.markdown("---")
         st.markdown("**Edge-Cloud Decision Logic:**")
-        col_a, col_b, col_c = st.columns(3)
-        strategy_labels = {"max": "Edge max conf", "avg": "Edge avg conf", "min": "Edge min conf"}
-        col_a.metric(strategy_labels[offload_strategy], f"{edge_conf_used:.3f}")
-        col_b.metric("Threshold", f"{threshold:.2f}")
+
+        # Show 3 conditions
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "① Max confidence",
+            f"{m['max_conf']:.3f}",
+            delta=f"{'✅' if m['cond1'] else '❌'} threshold {threshold:.2f}",
+        )
+        c2.metric(
+            "② Avg confidence",
+            f"{m['avg_conf']:.3f}",
+            delta=f"{'✅' if m['cond2'] else '❌'} threshold_avg {threshold_avg:.2f}",
+        )
+        c3.metric(
+            "③ Object count",
+            m['object_count'],
+            delta=f"{'✅' if m['cond3'] else '❌'} max {object_threshold}",
+        )
+
         if processing_place.startswith("📱"):
-            col_c.metric("Decision", "✅ Keep at Edge", delta="No upload (0 bytes)")
-            st.success(f"Edge confidence {edge_conf_used:.3f} ≥ threshold {threshold:.2f} → Edge result accepted. Bandwidth saved.")
+            st.success(
+                f"All 3 conditions met → **Keep at Edge** (0 bytes uploaded)\n\n"
+                f"① max_conf {m['max_conf']:.3f} ≥ {threshold:.2f}  "
+                f"② avg_conf {m['avg_conf']:.3f} ≥ {threshold_avg:.2f}  "
+                f"③ objects {m['object_count']} ≤ {object_threshold}"
+            )
         else:
-            col_c.metric("Decision", "☁️ Offload to Cloud", delta=f"+{len(image_bytes):,} bytes uploaded")
+            failed = []
+            if not m['cond1']: failed.append(f"max_conf {m['max_conf']:.3f} < {threshold:.2f}")
+            if not m['cond2']: failed.append(f"avg_conf {m['avg_conf']:.3f} < {threshold_avg:.2f}")
+            if not m['cond3']: failed.append(f"objects {m['object_count']} > {object_threshold}")
             st.warning(
-                f"Edge confidence {edge_conf_used:.3f} < threshold {threshold:.2f} → Offloaded to Cloud.\n\n"
-                f"Cloud result: confidence **{final_conf:.3f}** ({'+' if final_conf > edge_conf_used else ''}{final_conf - edge_conf_used:.3f} vs edge)"
+                f"Condition(s) failed → **Offload to Cloud** (+{len(image_bytes):,} bytes)\n\n"
+                f"Failed: {' | '.join(failed)}\n\n"
+                f"Cloud result: confidence **{final_conf:.3f}** ({'+' if final_conf > m['max_conf'] else ''}{final_conf - m['max_conf']:.3f} vs edge max)"
             )
 
         # ── Side-by-side Edge vs Cloud comparison ──────────────────────────
@@ -516,7 +562,7 @@ def page_comparison():
 # ---------------------------------------------------------------------------
 
 
-def page_video(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy: str = "max"):
+def page_video(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
     st.header("🎬 Video Analysis")
     st.info(
         f"Upload a video file (MP4, AVI). Each frame will be processed using the "
@@ -573,9 +619,14 @@ def page_video(threshold: float = CONFIDENCE_THRESHOLD, offload_strategy: str = 
         frame_bytes = buf.tobytes()
 
         edge_result = call_edge(frame_bytes)
-        if edge_result and edge_result["confidence"] >= threshold:
-            result = edge_result
-            place = "📱 Edge"
+        if edge_result:
+            keep, _ = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+            if keep:
+                result = edge_result
+                place = "📱 Edge"
+            else:
+                result = call_cloud(frame_bytes, f"frame_{frame_idx:04d}.jpg")
+                place = "☁️ Cloud" if result else "❌ Error"
         else:
             result = call_cloud(frame_bytes, f"frame_{frame_idx:04d}.jpg")
             place = "☁️ Cloud" if result else "❌ Error"
@@ -629,70 +680,58 @@ def main() -> None:
 
     # ── Dynamic confidence threshold ────────────────────────────────────────
     st.sidebar.markdown("### ⚙️ Edge-Cloud Settings")
+
     if "threshold" not in st.session_state:
         st.session_state.threshold = CONFIDENCE_THRESHOLD
+    if "threshold_avg" not in st.session_state:
+        st.session_state.threshold_avg = 0.4
+    if "object_threshold" not in st.session_state:
+        st.session_state.object_threshold = 10
 
     st.session_state.threshold = st.sidebar.slider(
-        "Offload Threshold",
-        min_value=0.01,
-        max_value=1.0,
+        "Max Confidence Threshold",
+        min_value=0.01, max_value=1.0,
         value=st.session_state.threshold,
         step=0.01,
-        help=(
-            "Confidence threshold for offload decision (0.01–1.0).\n\n"
-            "• threshold = 0.01 → almost never offload (edge handles everything)\n"
-            "• threshold = 1.0  → always offload (cloud handles everything)\n"
-            "• threshold = 0.6  → default balanced setting"
-        ),
+        help="Keep at Edge if max_confidence ≥ this value",
     )
     threshold = st.session_state.threshold
 
-    # Offload strategy
-    if "offload_strategy" not in st.session_state:
-        st.session_state.offload_strategy = "max"
-
-    st.session_state.offload_strategy = st.sidebar.selectbox(
-        "Offload Strategy",
-        options=["max", "avg", "min"],
-        index=["max", "avg", "min"].index(st.session_state.offload_strategy),
-        format_func=lambda x: {
-            "max": "Max confidence (default)",
-            "avg": "Average confidence",
-            "min": "Min confidence (strictest)",
-        }[x],
-        help=(
-            "Which confidence value to compare against threshold:\n\n"
-            "• Max — offload only if best detection is uncertain\n"
-            "• Avg — offload if average detection quality is low\n"
-            "• Min — offload if ANY detection is uncertain (strictest)"
-        ),
+    st.session_state.threshold_avg = st.sidebar.slider(
+        "Avg Confidence Threshold",
+        min_value=0.01, max_value=1.0,
+        value=st.session_state.threshold_avg,
+        step=0.01,
+        help="Keep at Edge if average_confidence ≥ this value",
     )
-    offload_strategy = st.session_state.offload_strategy
+    threshold_avg = st.session_state.threshold_avg
 
-    # Show threshold impact hint
-    if threshold <= 0.1:
-        st.sidebar.caption("🟢 Very low — edge handles almost everything (≈ edge-only)")
-    elif threshold <= 0.5:
-        st.sidebar.caption("🟡 Low — most images stay at edge")
-    elif threshold <= 0.7:
-        st.sidebar.caption("🟡 Balanced — default research setting (0.6)")
-    elif threshold <= 0.9:
-        st.sidebar.caption("🟠 High — more images offloaded to cloud")
-    elif threshold < 1.0:
-        st.sidebar.caption("🔴 Very high — most images offloaded to cloud")
-    else:
-        st.sidebar.caption("🔴 Maximum — always offload (≈ cloud-only)")
+    st.session_state.object_threshold = st.sidebar.slider(
+        "Max Object Count",
+        min_value=1, max_value=50,
+        value=st.session_state.object_threshold,
+        step=1,
+        help="Keep at Edge if object_count ≤ this value (too many objects → offload)",
+    )
+    object_threshold = st.session_state.object_threshold
+
+    st.sidebar.markdown(
+        f"**Keep at Edge if:**  \n"
+        f"`max_conf ≥ {threshold:.2f}`  \n"
+        f"`avg_conf ≥ {threshold_avg:.2f}`  \n"
+        f"`objects ≤ {object_threshold}`"
+    )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
     st.sidebar.markdown(f"**Edge URL:** `{EDGE_URL}`")
 
     if page == "single_image":
-        page_single_image(threshold, offload_strategy)
+        page_single_image(threshold, threshold_avg, object_threshold)
     elif page == "comparison":
         page_comparison()
     else:
-        page_video(threshold, offload_strategy)
+        page_video(threshold, threshold_avg, object_threshold)
 
 
 if __name__ == "__main__":
