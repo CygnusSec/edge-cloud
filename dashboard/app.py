@@ -132,7 +132,39 @@ def call_edge(image_bytes: bytes, filename: str = "image.jpg") -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def page_single_image():
+def _should_keep_at_edge(edge_result: dict, threshold: float, threshold_avg: float, object_threshold: int) -> tuple[bool, dict]:
+    """
+    Combined offload decision:
+      Keep at Edge if ALL three conditions are met:
+        1. max_confidence >= threshold
+        2. average_confidence >= threshold_avg
+        3. object_count <= object_threshold
+    Returns (keep_at_edge, metrics_dict)
+    """
+    objects = edge_result.get("objects", [])
+    object_count = edge_result.get("object_count", len(objects))
+    confs = [o.get("confidence", 0.0) for o in objects] if objects else []
+
+    max_conf = max(confs) if confs else 0.0
+    avg_conf = sum(confs) / len(confs) if confs else 0.0
+
+    cond1 = max_conf >= threshold
+    cond2 = avg_conf >= threshold_avg
+    cond3 = object_count <= object_threshold
+
+    keep = cond1 and cond2 and cond3
+
+    return keep, {
+        "max_conf": max_conf,
+        "avg_conf": avg_conf,
+        "object_count": object_count,
+        "cond1": cond1,
+        "cond2": cond2,
+        "cond3": cond3,
+    }
+
+
+def page_single_image(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
     st.header("🖼️ Single Image Analysis")
 
     col1, col2 = st.columns([2, 1])
@@ -140,6 +172,8 @@ def page_single_image():
         uploaded = st.file_uploader(
             "Upload image (JPEG, PNG, BMP)",
             type=["jpg", "jpeg", "png", "bmp"],
+            key="single_image_uploader",
+            accept_multiple_files=False,
         )
     with col2:
         scenario = st.selectbox(
@@ -147,6 +181,11 @@ def page_single_image():
             options=["edge_cloud", "cloud_only", "edge_only"],
             format_func=lambda x: SCENARIO_LABELS[x],
         )
+        if scenario == "edge_cloud":
+            st.info(
+                f"Current thresholds: max ≥ **{threshold:.2f}**, avg ≥ **{threshold_avg:.2f}**, objects ≤ **{object_threshold}**\n\n"
+                "Adjust in sidebar ←"
+            )
 
     if uploaded is None:
         st.info("Please upload an image to start analysis.")
@@ -162,6 +201,9 @@ def page_single_image():
 
     result = None
     processing_place = "—"
+    edge_conf_used = None
+    edge_result_saved = None
+    decision_metrics = None
 
     with st.spinner("Analyzing..."):
         if scenario == "cloud_only":
@@ -176,9 +218,19 @@ def page_single_image():
 
         else:  # edge_cloud
             edge_result = call_edge(image_bytes)
-            if edge_result and edge_result["confidence"] >= CONFIDENCE_THRESHOLD:
-                result = edge_result
-                processing_place = "📱 Edge"
+            if edge_result:
+                edge_result_saved = edge_result
+                keep, metrics = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+                decision_metrics = metrics
+                edge_conf_used = metrics["max_conf"]
+
+                if keep:
+                    result = edge_result
+                    processing_place = "📱 Edge"
+                else:
+                    result = call_cloud(image_bytes, uploaded.name)
+                    if result:
+                        processing_place = "☁️ Cloud"
             else:
                 result = call_cloud(image_bytes, uploaded.name)
                 if result:
@@ -191,7 +243,7 @@ def page_single_image():
     annotated = draw_bounding_boxes(image_bgr, result.get("objects", []))
     annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
 
-    st.image(annotated_rgb, caption="Detection result", use_column_width=True)
+    st.image(annotated_rgb, caption="Detection result", use_container_width=True)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Processed at", processing_place)
@@ -201,6 +253,93 @@ def page_single_image():
 
     if result.get("detected_classes"):
         st.write("**Detected classes:**", ", ".join(result["detected_classes"]))
+
+    # Show edge-cloud decision explanation
+    if scenario == "edge_cloud" and decision_metrics is not None:
+        final_conf = result.get("confidence", 0) if result else 0
+        m = decision_metrics
+        st.markdown("---")
+        st.markdown("**Edge-Cloud Decision Logic:**")
+
+        # Show 3 conditions
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "① Max confidence",
+            f"{m['max_conf']:.3f}",
+            delta=f"{'✅' if m['cond1'] else '❌'} threshold {threshold:.2f}",
+        )
+        c2.metric(
+            "② Avg confidence",
+            f"{m['avg_conf']:.3f}",
+            delta=f"{'✅' if m['cond2'] else '❌'} threshold_avg {threshold_avg:.2f}",
+        )
+        c3.metric(
+            "③ Object count",
+            m['object_count'],
+            delta=f"{'✅' if m['cond3'] else '❌'} max {object_threshold}",
+        )
+
+        if processing_place.startswith("📱"):
+            st.success(
+                f"All 3 conditions met → **Keep at Edge** (0 bytes uploaded)\n\n"
+                f"① max_conf {m['max_conf']:.3f} ≥ {threshold:.2f}  "
+                f"② avg_conf {m['avg_conf']:.3f} ≥ {threshold_avg:.2f}  "
+                f"③ objects {m['object_count']} ≤ {object_threshold}"
+            )
+        else:
+            failed = []
+            if not m['cond1']: failed.append(f"max_conf {m['max_conf']:.3f} < {threshold:.2f}")
+            if not m['cond2']: failed.append(f"avg_conf {m['avg_conf']:.3f} < {threshold_avg:.2f}")
+            if not m['cond3']: failed.append(f"objects {m['object_count']} > {object_threshold}")
+            st.warning(
+                f"Condition(s) failed → **Offload to Cloud** (+{len(image_bytes):,} bytes)\n\n"
+                f"Failed: {' | '.join(failed)}\n\n"
+                f"Cloud result: confidence **{final_conf:.3f}** ({'+' if final_conf > m['max_conf'] else ''}{final_conf - m['max_conf']:.3f} vs edge max)"
+            )
+
+        # ── Side-by-side Edge vs Cloud comparison ──────────────────────────
+        if edge_result_saved is not None and result is not None and processing_place.startswith("☁️"):
+            st.markdown("---")
+            st.markdown("### 🔄 Edge vs Cloud — Side-by-Side Comparison")
+            st.caption("Both models ran on the same image. Edge result triggered offload; Cloud result is used as final output.")
+
+            col_edge, col_cloud = st.columns(2)
+
+            # Draw edge bounding boxes
+            edge_annotated = draw_bounding_boxes(image_bgr, edge_result_saved.get("objects", []))
+            edge_rgb = cv2.cvtColor(edge_annotated, cv2.COLOR_BGR2RGB)
+
+            # Draw cloud bounding boxes
+            cloud_annotated = draw_bounding_boxes(image_bgr, result.get("objects", []))
+            cloud_rgb = cv2.cvtColor(cloud_annotated, cv2.COLOR_BGR2RGB)
+
+            with col_edge:
+                st.markdown("#### 📱 Edge (YOLOv8n) — *not used*")
+                st.image(edge_rgb, use_container_width=True)
+                e_conf = edge_result_saved.get("confidence", 0)
+                e_count = edge_result_saved.get("object_count", 0)
+                e_lat = edge_result_saved.get("latency_ms", 0)
+                e_classes = edge_result_saved.get("detected_classes", [])
+                st.metric("Confidence", f"{e_conf:.3f}", delta=f"{e_conf - final_conf:.3f} vs cloud")
+                st.metric("Objects", e_count)
+                st.metric("Latency", f"{e_lat:.1f} ms")
+                st.metric("Upload", "0 bytes")
+                if e_classes:
+                    st.caption(f"Classes: {', '.join(e_classes)}")
+
+            with col_cloud:
+                st.markdown("#### ☁️ Cloud (YOLOv8m) — *final result*")
+                st.image(cloud_rgb, use_container_width=True)
+                c_conf = result.get("confidence", 0)
+                c_count = result.get("object_count", 0)
+                c_lat = result.get("latency_ms", 0)
+                c_classes = result.get("detected_classes", [])
+                st.metric("Confidence", f"{c_conf:.3f}", delta=f"+{c_conf - e_conf:.3f} vs edge")
+                st.metric("Objects", c_count, delta=f"+{c_count - e_count}" if c_count > e_count else str(c_count - e_count))
+                st.metric("Latency", f"{c_lat:.1f} ms")
+                st.metric("Upload", f"{len(image_bytes):,} bytes")
+                if c_classes:
+                    st.caption(f"Classes: {', '.join(c_classes)}")
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +549,7 @@ def page_comparison():
 # ---------------------------------------------------------------------------
 
 
-def page_video():
+def page_video(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
     st.header("🎬 Video Analysis")
     st.info(
         f"Upload a video file (MP4, AVI). Each frame will be processed using the "
@@ -467,9 +606,14 @@ def page_video():
         frame_bytes = buf.tobytes()
 
         edge_result = call_edge(frame_bytes)
-        if edge_result and edge_result["confidence"] >= CONFIDENCE_THRESHOLD:
-            result = edge_result
-            place = "📱 Edge"
+        if edge_result:
+            keep, _ = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+            if keep:
+                result = edge_result
+                place = "📱 Edge"
+            else:
+                result = call_cloud(frame_bytes, f"frame_{frame_idx:04d}.jpg")
+                place = "☁️ Cloud" if result else "❌ Error"
         else:
             result = call_cloud(frame_bytes, f"frame_{frame_idx:04d}.jpg")
             place = "☁️ Cloud" if result else "❌ Error"
@@ -477,7 +621,7 @@ def page_video():
         if result:
             annotated = draw_bounding_boxes(frame, result.get("objects", []))
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(annotated_rgb, caption=f"Frame {frame_idx}", use_column_width=True)
+            frame_placeholder.image(annotated_rgb, caption=f"Frame {frame_idx}", use_container_width=True)
             info_placeholder.write(
                 f"**Frame {frame_idx}** | Processed at: {place} | "
                 f"Confidence: {result.get('confidence', 0):.3f} | "
@@ -491,6 +635,224 @@ def page_video():
     cap.release()
     os.unlink(video_path)
     st.success(f"Processed {processed} frames.")
+
+
+# ---------------------------------------------------------------------------
+# Page 4: Demo Cases — Prototype Evidence
+# ---------------------------------------------------------------------------
+
+
+def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0.4, object_threshold: int = 10):
+    st.header("🧪 Demo Cases — Prototype Evidence")
+    st.caption(
+        "Upload images to demonstrate three key scenarios. "
+        "Each case proves a different aspect of the edge-cloud system."
+    )
+
+    tab1, tab2, tab3 = st.tabs([
+        "✅ Case 1: Keep at Edge",
+        "☁️ Case 2: Offload to Cloud",
+        "📊 Case 3: Scenario Comparison",
+    ])
+
+    # ── Case 1: Keep at Edge ────────────────────────────────────────────────
+    with tab1:
+        st.subheader("Case 1: Simple Image — Keep at Edge")
+        st.markdown(
+            "**Goal:** Show that a clear, simple image with few objects and high confidence "
+            "is processed entirely at the edge — **zero bandwidth used**."
+        )
+        st.markdown(
+            f"**Conditions to keep at edge:**  \n"
+            f"- max_confidence ≥ **{threshold:.2f}**  \n"
+            f"- avg_confidence ≥ **{threshold_avg:.2f}**  \n"
+            f"- object_count ≤ **{object_threshold}**"
+        )
+
+        uploaded1 = st.file_uploader(
+            "Upload a simple/clear image (few objects, good lighting)",
+            type=["jpg", "jpeg", "png", "bmp"],
+            key="demo_case1",
+        )
+        if uploaded1:
+            img_bytes = uploaded1.read()
+            np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            with st.spinner("Running edge inference..."):
+                edge_result = call_edge(img_bytes, uploaded1.name)
+
+            if edge_result and img_bgr is not None:
+                keep, metrics = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+                m = metrics
+
+                annotated = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
+                st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="Edge result", use_container_width=True)
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Max confidence", f"{m['max_conf']:.3f}")
+                c2.metric("Avg confidence", f"{m['avg_conf']:.3f}")
+                c3.metric("Objects", m['object_count'])
+                c4.metric("Upload", "0 bytes ✅")
+
+                if keep:
+                    st.success(
+                        f"✅ **Keep at Edge** — All conditions met!\n\n"
+                        f"max_conf {m['max_conf']:.3f} ≥ {threshold:.2f} | "
+                        f"avg_conf {m['avg_conf']:.3f} ≥ {threshold_avg:.2f} | "
+                        f"objects {m['object_count']} ≤ {object_threshold}\n\n"
+                        f"**Bandwidth saved: {len(img_bytes):,} bytes (100% savings vs cloud-only)**"
+                    )
+                else:
+                    failed = []
+                    if not m['cond1']: failed.append(f"max_conf {m['max_conf']:.3f} < {threshold:.2f}")
+                    if not m['cond2']: failed.append(f"avg_conf {m['avg_conf']:.3f} < {threshold_avg:.2f}")
+                    if not m['cond3']: failed.append(f"objects {m['object_count']} > {object_threshold}")
+                    st.warning(
+                        f"⚠️ This image would be offloaded. Failed: {' | '.join(failed)}\n\n"
+                        "Try an image with fewer, clearer objects, or adjust thresholds in sidebar."
+                    )
+
+    # ── Case 2: Offload to Cloud ─────────────────────────────────────────────
+    with tab2:
+        st.subheader("Case 2: Complex Image — Offload to Cloud")
+        st.markdown(
+            "**Goal:** Show that a complex image (many objects, low confidence, or crowded scene) "
+            "triggers offload to cloud — **cloud model provides better accuracy**."
+        )
+
+        uploaded2 = st.file_uploader(
+            "Upload a complex image (many objects, crowded, or low light)",
+            type=["jpg", "jpeg", "png", "bmp"],
+            key="demo_case2",
+        )
+        if uploaded2:
+            img_bytes = uploaded2.read()
+            np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            with st.spinner("Running edge + cloud inference..."):
+                edge_result = call_edge(img_bytes, uploaded2.name)
+                cloud_result = call_cloud(img_bytes, uploaded2.name)
+
+            if edge_result and cloud_result and img_bgr is not None:
+                keep, metrics = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+                m = metrics
+
+                col_e, col_c = st.columns(2)
+                with col_e:
+                    st.markdown("#### 📱 Edge (YOLOv8n)")
+                    ann_e = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
+                    st.image(cv2.cvtColor(ann_e, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    st.metric("Max confidence", f"{m['max_conf']:.3f}")
+                    st.metric("Avg confidence", f"{m['avg_conf']:.3f}")
+                    st.metric("Objects", m['object_count'])
+                    st.metric("Upload", "0 bytes")
+
+                with col_c:
+                    st.markdown("#### ☁️ Cloud (YOLOv8m)")
+                    ann_c = draw_bounding_boxes(img_bgr, cloud_result.get("objects", []))
+                    st.image(cv2.cvtColor(ann_c, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    st.metric("Max confidence", f"{cloud_result.get('confidence', 0):.3f}",
+                              delta=f"+{cloud_result.get('confidence', 0) - m['max_conf']:.3f}")
+                    st.metric("Objects", cloud_result.get("object_count", 0),
+                              delta=f"+{cloud_result.get('object_count', 0) - m['object_count']}")
+                    st.metric("Upload", f"{len(img_bytes):,} bytes")
+
+                if not keep:
+                    failed = []
+                    if not m['cond1']: failed.append(f"max_conf {m['max_conf']:.3f} < {threshold:.2f}")
+                    if not m['cond2']: failed.append(f"avg_conf {m['avg_conf']:.3f} < {threshold_avg:.2f}")
+                    if not m['cond3']: failed.append(f"objects {m['object_count']} > {object_threshold}")
+                    st.warning(
+                        f"☁️ **Offload to Cloud** — Condition(s) failed: {' | '.join(failed)}\n\n"
+                        f"Cloud improved confidence: {m['max_conf']:.3f} → {cloud_result.get('confidence', 0):.3f}"
+                    )
+                else:
+                    st.info("This image would be kept at edge with current thresholds. Try adjusting thresholds in sidebar to force offload.")
+
+    # ── Case 3: Scenario Comparison ──────────────────────────────────────────
+    with tab3:
+        st.subheader("Case 3: Same Image — Three Scenarios Compared")
+        st.markdown(
+            "**Goal:** Run the same image through all three scenarios and compare "
+            "latency, bandwidth, and confidence side by side."
+        )
+
+        uploaded3 = st.file_uploader(
+            "Upload any image to compare all three scenarios",
+            type=["jpg", "jpeg", "png", "bmp"],
+            key="demo_case3",
+        )
+        if uploaded3:
+            img_bytes = uploaded3.read()
+            np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            with st.spinner("Running all three scenarios..."):
+                edge_result = call_edge(img_bytes, uploaded3.name)
+                cloud_result = call_cloud(img_bytes, uploaded3.name)
+
+            if edge_result and cloud_result and img_bgr is not None:
+                keep, metrics = _should_keep_at_edge(edge_result, threshold, threshold_avg, object_threshold)
+                m = metrics
+
+                # Edge-cloud final result
+                ec_result = edge_result if keep else cloud_result
+                ec_place = "Edge" if keep else "Cloud"
+                ec_upload = 0 if keep else len(img_bytes)
+
+                # Build comparison table
+                rows = [
+                    {
+                        "Scenario": "Cloud-Only",
+                        "Processed at": "☁️ Cloud",
+                        "Confidence": f"{cloud_result.get('confidence', 0):.3f}",
+                        "Objects": cloud_result.get("object_count", 0),
+                        "Latency (ms)": f"{cloud_result.get('latency_ms', 0):.1f}",
+                        "Upload (bytes)": f"{len(img_bytes):,}",
+                    },
+                    {
+                        "Scenario": "Edge-Only",
+                        "Processed at": "📱 Edge",
+                        "Confidence": f"{m['max_conf']:.3f}",
+                        "Objects": m['object_count'],
+                        "Latency (ms)": f"{edge_result.get('latency_ms', 0):.1f}",
+                        "Upload (bytes)": "0",
+                    },
+                    {
+                        "Scenario": "Edge-Cloud",
+                        "Processed at": f"{'📱 Edge' if keep else '☁️ Cloud'}",
+                        "Confidence": f"{ec_result.get('confidence', 0):.3f}",
+                        "Objects": ec_result.get("object_count", 0),
+                        "Latency (ms)": f"{ec_result.get('latency_ms', 0):.1f}",
+                        "Upload (bytes)": f"{ec_upload:,}",
+                    },
+                ]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+                # Visual comparison
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("**Cloud-Only**")
+                    ann = draw_bounding_boxes(img_bgr, cloud_result.get("objects", []))
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
+                with col2:
+                    st.markdown("**Edge-Only**")
+                    ann = draw_bounding_boxes(img_bgr, edge_result.get("objects", []))
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
+                with col3:
+                    st.markdown(f"**Edge-Cloud** → {ec_place}")
+                    ann = draw_bounding_boxes(img_bgr, ec_result.get("objects", []))
+                    st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+                # Key insight
+                bw_savings = (1 - ec_upload / len(img_bytes)) * 100 if len(img_bytes) > 0 else 0
+                st.info(
+                    f"**Key insight:** Edge-Cloud processed at **{ec_place}** with "
+                    f"confidence **{ec_result.get('confidence', 0):.3f}** and "
+                    f"**{bw_savings:.0f}% bandwidth savings** vs Cloud-Only."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -508,27 +870,76 @@ def main() -> None:
     st.title("🌐 Edge-Cloud Computing Demo")
     st.caption("Multimedia transmission and large-scale image semantic analysis via Edge-Cloud architecture")
 
+    # ── Sidebar navigation ──────────────────────────────────────────────────
     page = st.sidebar.radio(
         "Navigation",
-        options=["single_image", "comparison", "video"],
+        options=["single_image", "comparison", "demo_cases", "video"],
         format_func=lambda x: {
             "single_image": "🖼️ Single Image Analysis",
             "comparison": "📊 Scenario Comparison",
+            "demo_cases": "🧪 Demo Cases",
             "video": "🎬 Video Analysis",
         }[x],
     )
 
     st.sidebar.markdown("---")
+
+    # ── Dynamic confidence threshold ────────────────────────────────────────
+    st.sidebar.markdown("### ⚙️ Edge-Cloud Settings")
+
+    if "threshold" not in st.session_state:
+        st.session_state.threshold = CONFIDENCE_THRESHOLD
+    if "threshold_avg" not in st.session_state:
+        st.session_state.threshold_avg = 0.4
+    if "object_threshold" not in st.session_state:
+        st.session_state.object_threshold = 10
+
+    st.session_state.threshold = st.sidebar.slider(
+        "Max Confidence Threshold",
+        min_value=0.01, max_value=1.0,
+        value=st.session_state.threshold,
+        step=0.01,
+        help="Keep at Edge if max_confidence ≥ this value",
+    )
+    threshold = st.session_state.threshold
+
+    st.session_state.threshold_avg = st.sidebar.slider(
+        "Avg Confidence Threshold",
+        min_value=0.01, max_value=1.0,
+        value=st.session_state.threshold_avg,
+        step=0.01,
+        help="Keep at Edge if average_confidence ≥ this value",
+    )
+    threshold_avg = st.session_state.threshold_avg
+
+    st.session_state.object_threshold = st.sidebar.slider(
+        "Max Object Count",
+        min_value=1, max_value=50,
+        value=st.session_state.object_threshold,
+        step=1,
+        help="Keep at Edge if object_count ≤ this value (too many objects → offload)",
+    )
+    object_threshold = st.session_state.object_threshold
+
+    st.sidebar.markdown(
+        f"**Keep at Edge if:**  \n"
+        f"`max_conf ≥ {threshold:.2f}`  \n"
+        f"`avg_conf ≥ {threshold_avg:.2f}`  \n"
+        f"`objects ≤ {object_threshold}`"
+    )
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
     st.sidebar.markdown(f"**Edge URL:** `{EDGE_URL}`")
-    st.sidebar.markdown(f"**Threshold:** `{CONFIDENCE_THRESHOLD}`")
 
     if page == "single_image":
-        page_single_image()
+        page_single_image(threshold, threshold_avg, object_threshold)
     elif page == "comparison":
         page_comparison()
+    elif page == "demo_cases":
+        page_demo_cases(threshold, threshold_avg, object_threshold)
     else:
-        page_video()
+        page_video(threshold, threshold_avg, object_threshold)
 
 
 if __name__ == "__main__":
