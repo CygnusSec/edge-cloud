@@ -22,4 +22,4 @@ ENV DATASET_DIR=/app/dataset
 ENV CLOUD_URL=http://cloud_node:8000
 ENV CONFIDENCE_THRESHOLD=0.6
 
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true", "--server.maxUploadSize=500"]

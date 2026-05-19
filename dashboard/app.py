@@ -557,15 +557,15 @@ def page_video(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0
     )
 
     uploaded_video = st.file_uploader(
-        "Upload video (MP4, AVI, max 100MB)",
+        "Upload video (MP4, AVI, max 500MB)",
         type=["mp4", "avi"],
     )
 
     if uploaded_video is None:
         return
 
-    if uploaded_video.size > 100 * 1024 * 1024:
-        st.error("Video file exceeds 100MB limit.")
+    if uploaded_video.size > 500 * 1024 * 1024:
+        st.error("Video file exceeds 500MB limit.")
         return
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -911,43 +911,40 @@ def page_experiment_results():
         )
 
     if run_all:
-        import sys
-        import subprocess
-
-        edge_dir = os.path.join(os.path.dirname(__file__), "..", "edge")
         os.makedirs(results_dir, exist_ok=True)
+        edge_url = os.environ.get("EDGE_URL", "http://edge_node:8001")
 
         scenarios = [
-            ("☁️ Cloud-Only", "run_cloud_only.py", ["--cloud-url", cloud_url,
-                                                     "--dataset-dir", dataset_dir,
-                                                     "--output-dir", results_dir]),
-            ("📱 Edge-Only",  "run_edge_only.py",  ["--dataset-dir", dataset_dir,
-                                                     "--output-dir", results_dir]),
-            ("🔄 Edge-Cloud", "run_edge_cloud.py", ["--cloud-url", cloud_url,
-                                                     "--dataset-dir", dataset_dir,
-                                                     "--output-dir", results_dir]),
+            ("☁️ Cloud-Only", "cloud_only"),
+            ("📱 Edge-Only",  "edge_only"),
+            ("🔄 Edge-Cloud", "edge_cloud"),
         ]
 
-        for label, script, args in scenarios:
-            with st.status(f"Running {label}...", expanded=False) as s:
+        for label, scenario in scenarios:
+            with st.status(f"Running {label}...", expanded=True) as s:
                 try:
-                    script_path = os.path.join(edge_dir, script)
-                    result = subprocess.run(
-                        [sys.executable, script_path] + args,
-                        capture_output=True, text=True, timeout=600
+                    resp = requests.post(
+                        f"{edge_url}/run-experiment/{scenario}",
+                        timeout=660,
                     )
-                    if result.returncode == 0:
-                        # Extract summary from stdout
-                        summary_lines = [l for l in result.stdout.splitlines() if l.strip()]
-                        s.update(label=f"✅ {label} complete", state="complete")
-                        st.code("\n".join(summary_lines[-10:]))
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("success"):
+                            s.update(label=f"✅ {label} complete", state="complete")
+                            # Show last lines of stdout
+                            lines = [l for l in data.get("stdout", "").splitlines() if l.strip()]
+                            if lines:
+                                st.code("\n".join(lines[-10:]))
+                        else:
+                            s.update(label=f"❌ {label} failed", state="error")
+                            st.error(data.get("stderr", "Unknown error"))
                     else:
-                        s.update(label=f"❌ {label} failed", state="error")
-                        st.error(result.stderr[-500:] if result.stderr else "Unknown error")
-                except subprocess.TimeoutExpired:
+                        s.update(label=f"❌ {label} HTTP {resp.status_code}", state="error")
+                        st.error(resp.text[:500])
+                except requests.Timeout:
                     s.update(label=f"⏱ {label} timed out", state="error")
                 except Exception as exc:
-                    s.update(label=f"❌ {label} error: {exc}", state="error")
+                    s.update(label=f"❌ {label}: {exc}", state="error")
 
         st.rerun()
 
