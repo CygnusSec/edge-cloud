@@ -873,8 +873,83 @@ def page_experiment_results():
     st.header("📋 Experiment Results — Table 5.3")
     st.caption(
         "Automatically computed from CSV result files. "
-        "Run the experiment scripts first to populate the data."
+        "Download dataset and run experiments to populate the data."
     )
+
+    # ── Run experiments button ────────────────────────────────────────────────
+    dataset_dir = os.environ.get("DATASET_DIR", "dataset")
+    results_dir = os.environ.get("RESULTS_DIR", "results")
+    cloud_url = os.environ.get("CLOUD_URL", "http://cloud_node:8000")
+
+    # Check if dataset has images
+    img_count = sum(
+        len([f for f in os.listdir(os.path.join(dataset_dir, "images", d))
+             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
+        for d in ("easy", "medium", "hard")
+        if os.path.isdir(os.path.join(dataset_dir, "images", d))
+    ) if os.path.isdir(os.path.join(dataset_dir, "images")) else 0
+
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+
+    with col_btn1:
+        run_all = st.button(
+            "▶️ Run All 3 Scenarios",
+            disabled=(img_count == 0),
+            help="Run cloud-only, edge-only, and edge-cloud experiments on the dataset",
+            use_container_width=True,
+        )
+    with col_btn2:
+        st.metric("Dataset images", img_count, help="Images in dataset/images/easy|medium|hard")
+    with col_btn3:
+        existing = sum(1 for k in ["cloud_only", "edge_only", "edge_cloud"]
+                       if os.path.exists(os.path.join(results_dir, f"{k}.csv")))
+        st.metric("Results available", f"{existing}/3")
+
+    if img_count == 0:
+        st.warning(
+            "⚠️ No images in dataset. Click **⬇️ Download Test Dataset** in the sidebar first."
+        )
+
+    if run_all:
+        import sys
+        import subprocess
+
+        edge_dir = os.path.join(os.path.dirname(__file__), "..", "edge")
+        os.makedirs(results_dir, exist_ok=True)
+
+        scenarios = [
+            ("☁️ Cloud-Only", "run_cloud_only.py", ["--cloud-url", cloud_url,
+                                                     "--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+            ("📱 Edge-Only",  "run_edge_only.py",  ["--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+            ("🔄 Edge-Cloud", "run_edge_cloud.py", ["--cloud-url", cloud_url,
+                                                     "--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+        ]
+
+        for label, script, args in scenarios:
+            with st.status(f"Running {label}...", expanded=False) as s:
+                try:
+                    script_path = os.path.join(edge_dir, script)
+                    result = subprocess.run(
+                        [sys.executable, script_path] + args,
+                        capture_output=True, text=True, timeout=600
+                    )
+                    if result.returncode == 0:
+                        # Extract summary from stdout
+                        summary_lines = [l for l in result.stdout.splitlines() if l.strip()]
+                        s.update(label=f"✅ {label} complete", state="complete")
+                        st.code("\n".join(summary_lines[-10:]))
+                    else:
+                        s.update(label=f"❌ {label} failed", state="error")
+                        st.error(result.stderr[-500:] if result.stderr else "Unknown error")
+                except subprocess.TimeoutExpired:
+                    s.update(label=f"⏱ {label} timed out", state="error")
+                except Exception as exc:
+                    s.update(label=f"❌ {label} error: {exc}", state="error")
+
+        st.rerun()
 
     # Load all three scenario CSVs
     dfs: dict[str, pd.DataFrame] = {}
@@ -888,12 +963,7 @@ def page_experiment_results():
             dfs[key] = df
 
     if not dfs:
-        st.warning(
-            "No experiment data found. Please run the experiment scripts first:\n"
-            "```\npython edge/run_cloud_only.py\n"
-            "python edge/run_edge_only.py\n"
-            "python edge/run_edge_cloud.py\n```"
-        )
+        st.info("No results yet. Click **▶️ Run All 3 Scenarios** above to generate data.")
         return
 
     def _get(key: str, col: str, agg: str = "mean") -> str:
@@ -1152,25 +1222,48 @@ def main() -> None:
         with st.sidebar.status("Downloading...", expanded=True) as status:
             try:
                 import urllib.request
+                # Use verified picsum.photos IDs that are known to exist
                 SAMPLE_URLS = {
-                    "easy":   [(f"https://picsum.photos/id/{200+i}/640/480", f"easy_{i+1:03d}.jpg") for i in range(10)],
-                    "medium": [(f"https://picsum.photos/id/{400+i}/640/480", f"medium_{i+1:03d}.jpg") for i in range(10)],
-                    "hard":   [(f"https://picsum.photos/id/{500+i}/640/480", f"hard_{i+1:03d}.jpg") for i in range(10)],
+                    "easy":   [
+                        (f"https://picsum.photos/seed/easy{i}/640/480", f"easy_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
+                    "medium": [
+                        (f"https://picsum.photos/seed/medium{i}/640/480", f"medium_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
+                    "hard":   [
+                        (f"https://picsum.photos/seed/hard{i}/640/480", f"hard_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
                 }
                 downloaded = 0
+                failed = 0
                 for difficulty, images in SAMPLE_URLS.items():
                     out_dir = os.path.join(dataset_dir, "images", difficulty)
                     os.makedirs(out_dir, exist_ok=True)
                     for url, fname in images:
                         out_path = os.path.join(out_dir, fname)
-                        if not os.path.exists(out_path):
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                            st.write(f"⏭ {difficulty}/{fname} (already exists)")
+                            downloaded += 1
+                            continue
+                        try:
                             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                             with urllib.request.urlopen(req, timeout=15) as resp:
-                                with open(out_path, "wb") as f:
-                                    f.write(resp.read())
-                        downloaded += 1
-                        st.write(f"✓ {difficulty}/{fname}")
-                status.update(label=f"✅ Downloaded {downloaded} images", state="complete")
+                                data = resp.read()
+                            with open(out_path, "wb") as f:
+                                f.write(data)
+                            st.write(f"✓ {difficulty}/{fname} ({len(data):,} bytes)")
+                            downloaded += 1
+                        except Exception as e:
+                            st.write(f"⚠ {difficulty}/{fname}: {e}")
+                            failed += 1
+                            continue
+                if failed == 0:
+                    status.update(label=f"✅ Downloaded {downloaded} images", state="complete")
+                else:
+                    status.update(label=f"⚠️ {downloaded} ok, {failed} failed", state="complete")
             except Exception as exc:
                 status.update(label=f"❌ Error: {exc}", state="error")
 
