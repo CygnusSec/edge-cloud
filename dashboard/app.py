@@ -1132,6 +1132,48 @@ def main() -> None:
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
     st.sidebar.markdown(f"**Edge URL:** `{EDGE_URL}`")
 
+    # ── Dataset management ───────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📦 Dataset")
+    dataset_dir = os.environ.get("DATASET_DIR", "dataset")
+    img_count = sum(
+        len([f for f in os.listdir(os.path.join(dataset_dir, "images", d))
+             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
+        for d in ("easy", "medium", "hard")
+        if os.path.isdir(os.path.join(dataset_dir, "images", d))
+    ) if os.path.isdir(os.path.join(dataset_dir, "images")) else 0
+
+    if img_count > 0:
+        st.sidebar.success(f"✅ {img_count} images available")
+    else:
+        st.sidebar.warning("⚠️ No images found")
+
+    if st.sidebar.button("⬇️ Download Test Dataset", help="Download 30 sample images (10 per difficulty level)"):
+        with st.sidebar.status("Downloading...", expanded=True) as status:
+            try:
+                import urllib.request
+                SAMPLE_URLS = {
+                    "easy":   [(f"https://picsum.photos/id/{200+i}/640/480", f"easy_{i+1:03d}.jpg") for i in range(10)],
+                    "medium": [(f"https://picsum.photos/id/{400+i}/640/480", f"medium_{i+1:03d}.jpg") for i in range(10)],
+                    "hard":   [(f"https://picsum.photos/id/{500+i}/640/480", f"hard_{i+1:03d}.jpg") for i in range(10)],
+                }
+                downloaded = 0
+                for difficulty, images in SAMPLE_URLS.items():
+                    out_dir = os.path.join(dataset_dir, "images", difficulty)
+                    os.makedirs(out_dir, exist_ok=True)
+                    for url, fname in images:
+                        out_path = os.path.join(out_dir, fname)
+                        if not os.path.exists(out_path):
+                            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                with open(out_path, "wb") as f:
+                                    f.write(resp.read())
+                        downloaded += 1
+                        st.write(f"✓ {difficulty}/{fname}")
+                status.update(label=f"✅ Downloaded {downloaded} images", state="complete")
+            except Exception as exc:
+                status.update(label=f"❌ Error: {exc}", state="error")
+
     if page == "single_image":
         page_single_image(threshold, threshold_avg, object_threshold)
     elif page == "comparison":
