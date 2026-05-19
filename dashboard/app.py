@@ -557,15 +557,15 @@ def page_video(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: float = 0
     )
 
     uploaded_video = st.file_uploader(
-        "Upload video (MP4, AVI, max 100MB)",
+        "Upload video (MP4, AVI, max 500MB)",
         type=["mp4", "avi"],
     )
 
     if uploaded_video is None:
         return
 
-    if uploaded_video.size > 100 * 1024 * 1024:
-        st.error("Video file exceeds 100MB limit.")
+    if uploaded_video.size > 500 * 1024 * 1024:
+        st.error("Video file exceeds 500MB limit.")
         return
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
