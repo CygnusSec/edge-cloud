@@ -911,61 +911,42 @@ def page_experiment_results():
         )
 
     if run_all:
-        import sys
-        import subprocess
-
-        edge_dir = os.path.join(os.path.dirname(__file__), "..", "edge")
         os.makedirs(results_dir, exist_ok=True)
+        edge_url = os.environ.get("EDGE_URL", "http://edge_node:8001")
 
-        # Check if edge scripts are accessible
-        edge_scripts_available = os.path.isdir(edge_dir) and os.path.exists(
-            os.path.join(edge_dir, "run_cloud_only.py")
-        )
+        scenarios = [
+            ("☁️ Cloud-Only", "cloud_only"),
+            ("📱 Edge-Only",  "edge_only"),
+            ("🔄 Edge-Cloud", "edge_cloud"),
+        ]
 
-        if not edge_scripts_available:
-            st.error(
-                "❌ Edge scripts not found at `/app/edge/`. "
-                "Please run experiments manually in the edge_node container:\n"
-                "```bash\n"
-                "docker exec edge_node python run_cloud_only.py\n"
-                "docker exec edge_node python run_edge_only.py\n"
-                "docker exec edge_node python run_edge_cloud.py\n"
-                "```\n"
-                "Then refresh this page."
-            )
-        else:
-            scenarios = [
-                ("☁️ Cloud-Only", "run_cloud_only.py", ["--cloud-url", cloud_url,
-                                                         "--dataset-dir", dataset_dir,
-                                                         "--output-dir", results_dir]),
-                ("📱 Edge-Only",  "run_edge_only.py",  ["--dataset-dir", dataset_dir,
-                                                         "--output-dir", results_dir]),
-                ("🔄 Edge-Cloud", "run_edge_cloud.py", ["--cloud-url", cloud_url,
-                                                         "--dataset-dir", dataset_dir,
-                                                         "--output-dir", results_dir]),
-            ]
-
-            for label, script, args in scenarios:
-                with st.status(f"Running {label}...", expanded=False) as s:
-                    try:
-                        script_path = os.path.join(edge_dir, script)
-                        result = subprocess.run(
-                            [sys.executable, script_path] + args,
-                            capture_output=True, text=True, timeout=600
-                        )
-                        if result.returncode == 0:
-                            summary_lines = [l for l in result.stdout.splitlines() if l.strip()]
+        for label, scenario in scenarios:
+            with st.status(f"Running {label}...", expanded=True) as s:
+                try:
+                    resp = requests.post(
+                        f"{edge_url}/run-experiment/{scenario}",
+                        timeout=660,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("success"):
                             s.update(label=f"✅ {label} complete", state="complete")
-                            st.code("\n".join(summary_lines[-10:]))
+                            # Show last lines of stdout
+                            lines = [l for l in data.get("stdout", "").splitlines() if l.strip()]
+                            if lines:
+                                st.code("\n".join(lines[-10:]))
                         else:
                             s.update(label=f"❌ {label} failed", state="error")
-                            st.error(result.stderr[-500:] if result.stderr else "Unknown error")
-                    except subprocess.TimeoutExpired:
-                        s.update(label=f"⏱ {label} timed out", state="error")
-                    except Exception as exc:
-                        s.update(label=f"❌ {label} error: {exc}", state="error")
+                            st.error(data.get("stderr", "Unknown error"))
+                    else:
+                        s.update(label=f"❌ {label} HTTP {resp.status_code}", state="error")
+                        st.error(resp.text[:500])
+                except requests.Timeout:
+                    s.update(label=f"⏱ {label} timed out", state="error")
+                except Exception as exc:
+                    s.update(label=f"❌ {label}: {exc}", state="error")
 
-            st.rerun()
+        st.rerun()
 
     # Load all three scenario CSVs
     dfs: dict[str, pd.DataFrame] = {}

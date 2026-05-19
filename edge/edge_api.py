@@ -158,3 +158,48 @@ async def health_check() -> dict[str, Any]:
         "model": _MODEL_NAME,
         "model_loaded": _model is not None,
     }
+
+
+@app.post("/run-experiment/{scenario}")
+async def run_experiment(scenario: str) -> dict[str, Any]:
+    """
+    Trigger an experiment scenario on the edge node.
+    scenario: cloud_only | edge_only | edge_cloud
+    """
+    import subprocess
+    import sys
+    import os
+
+    valid = {"cloud_only", "edge_only", "edge_cloud"}
+    if scenario not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid scenario. Must be one of: {valid}")
+
+    script_map = {
+        "cloud_only": "run_cloud_only.py",
+        "edge_only": "run_edge_only.py",
+        "edge_cloud": "run_edge_cloud.py",
+    }
+
+    script_path = os.path.join(os.path.dirname(__file__), script_map[scenario])
+    cloud_url = os.environ.get("CLOUD_URL", "http://cloud_node:8000")
+    dataset_dir = os.environ.get("DATASET_DIR", "/app/dataset")
+    output_dir = os.environ.get("OUTPUT_DIR", "/app/results")
+
+    args = [sys.executable, script_path,
+            "--dataset-dir", dataset_dir,
+            "--output-dir", output_dir]
+    if scenario != "edge_only":
+        args += ["--cloud-url", cloud_url]
+
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=600)
+        return {
+            "scenario": scenario,
+            "success": result.returncode == 0,
+            "stdout": result.stdout[-2000:],
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Experiment timed out after 600s")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
