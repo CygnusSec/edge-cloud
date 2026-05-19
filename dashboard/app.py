@@ -856,6 +856,275 @@ def page_demo_cases(threshold: float = CONFIDENCE_THRESHOLD, threshold_avg: floa
 
 
 # ---------------------------------------------------------------------------
+# Page 5: Experiment Results — Table 5.3
+# ---------------------------------------------------------------------------
+
+
+def _compute_p95(values: list[float]) -> float:
+    """Compute 95th percentile."""
+    if not values:
+        return 0.0
+    sorted_v = sorted(values)
+    idx = int(len(sorted_v) * 0.95)
+    return sorted_v[min(idx, len(sorted_v) - 1)]
+
+
+def page_experiment_results():
+    st.header("📋 Experiment Results — Table 5.3")
+    st.caption(
+        "Automatically computed from CSV result files. "
+        "Download dataset and run experiments to populate the data."
+    )
+
+    # ── Run experiments button ────────────────────────────────────────────────
+    dataset_dir = os.environ.get("DATASET_DIR", "dataset")
+    results_dir = os.environ.get("RESULTS_DIR", "results")
+    cloud_url = os.environ.get("CLOUD_URL", "http://cloud_node:8000")
+
+    # Check if dataset has images
+    img_count = sum(
+        len([f for f in os.listdir(os.path.join(dataset_dir, "images", d))
+             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
+        for d in ("easy", "medium", "hard")
+        if os.path.isdir(os.path.join(dataset_dir, "images", d))
+    ) if os.path.isdir(os.path.join(dataset_dir, "images")) else 0
+
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+
+    with col_btn1:
+        run_all = st.button(
+            "▶️ Run All 3 Scenarios",
+            disabled=(img_count == 0),
+            help="Run cloud-only, edge-only, and edge-cloud experiments on the dataset",
+            use_container_width=True,
+        )
+    with col_btn2:
+        st.metric("Dataset images", img_count, help="Images in dataset/images/easy|medium|hard")
+    with col_btn3:
+        existing = sum(1 for k in ["cloud_only", "edge_only", "edge_cloud"]
+                       if os.path.exists(os.path.join(results_dir, f"{k}.csv")))
+        st.metric("Results available", f"{existing}/3")
+
+    if img_count == 0:
+        st.warning(
+            "⚠️ No images in dataset. Click **⬇️ Download Test Dataset** in the sidebar first."
+        )
+
+    if run_all:
+        import sys
+        import subprocess
+
+        edge_dir = os.path.join(os.path.dirname(__file__), "..", "edge")
+        os.makedirs(results_dir, exist_ok=True)
+
+        scenarios = [
+            ("☁️ Cloud-Only", "run_cloud_only.py", ["--cloud-url", cloud_url,
+                                                     "--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+            ("📱 Edge-Only",  "run_edge_only.py",  ["--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+            ("🔄 Edge-Cloud", "run_edge_cloud.py", ["--cloud-url", cloud_url,
+                                                     "--dataset-dir", dataset_dir,
+                                                     "--output-dir", results_dir]),
+        ]
+
+        for label, script, args in scenarios:
+            with st.status(f"Running {label}...", expanded=False) as s:
+                try:
+                    script_path = os.path.join(edge_dir, script)
+                    result = subprocess.run(
+                        [sys.executable, script_path] + args,
+                        capture_output=True, text=True, timeout=600
+                    )
+                    if result.returncode == 0:
+                        # Extract summary from stdout
+                        summary_lines = [l for l in result.stdout.splitlines() if l.strip()]
+                        s.update(label=f"✅ {label} complete", state="complete")
+                        st.code("\n".join(summary_lines[-10:]))
+                    else:
+                        s.update(label=f"❌ {label} failed", state="error")
+                        st.error(result.stderr[-500:] if result.stderr else "Unknown error")
+                except subprocess.TimeoutExpired:
+                    s.update(label=f"⏱ {label} timed out", state="error")
+                except Exception as exc:
+                    s.update(label=f"❌ {label} error: {exc}", state="error")
+
+        st.rerun()
+
+    # Load all three scenario CSVs
+    dfs: dict[str, pd.DataFrame] = {}
+    for key, path in SCENARIO_FILES.items():
+        df = load_csv(path)
+        if df is not None:
+            for col in ["latency_ms", "uploaded_bytes", "confidence",
+                        "object_count", "cpu_percent", "ram_mb"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            dfs[key] = df
+
+    if not dfs:
+        st.info("No results yet. Click **▶️ Run All 3 Scenarios** above to generate data.")
+        return
+
+    def _get(key: str, col: str, agg: str = "mean") -> str:
+        if key not in dfs or col not in dfs[key].columns:
+            return "—"
+        vals = dfs[key][col].dropna().tolist()
+        if not vals:
+            return "—"
+        if agg == "mean":
+            return f"{sum(vals) / len(vals):.2f}"
+        elif agg == "sum":
+            return f"{int(sum(vals)):,}"
+        elif agg == "p95":
+            return f"{_compute_p95(vals):.2f}"
+        elif agg == "throughput":
+            total_ms = dfs[key]["latency_ms"].dropna().sum()
+            n = len(dfs[key])
+            return f"{n / max(total_ms / 1000, 0.001):.4f}" if total_ms > 0 else "—"
+        return "—"
+
+    def _offload_ratio(key: str) -> str:
+        if key not in dfs or "offloaded" not in dfs[key].columns:
+            return "N/A"
+        df = dfs[key]
+        total = len(df)
+        offloaded = (df["offloaded"].astype(str).str.lower() == "true").sum()
+        return f"{offloaded / total * 100:.1f}%" if total > 0 else "—"
+
+    # ── Table 5.3 ────────────────────────────────────────────────────────────
+    st.subheader("Table 5.3: Experiment Results Summary")
+
+    metrics = [
+        ("Avg Latency (ms)",        "latency_ms",      "mean"),
+        ("P95 Latency (ms)",        "latency_ms",      "p95"),
+        ("Total Upload (bytes)",    "uploaded_bytes",  "sum"),
+        ("Throughput (img/s)",      "latency_ms",      "throughput"),
+        ("Avg Confidence",          "confidence",      "mean"),
+        ("Avg Object Count",        "object_count",    "mean"),
+        ("Avg CPU Usage (%)",       "cpu_percent",     "mean"),
+        ("Avg RAM Usage (MB)",      "ram_mb",          "mean"),
+    ]
+
+    rows = []
+    for label, col, agg in metrics:
+        rows.append({
+            "Metric": label,
+            "Cloud-Only": _get("cloud_only", col, agg),
+            "Edge-Only":  _get("edge_only",  col, agg),
+            "Edge-Cloud": _get("edge_cloud", col, agg),
+        })
+
+    # Add offload ratio row
+    rows.append({
+        "Metric": "Offload Ratio (%)",
+        "Cloud-Only": "100%",
+        "Edge-Only":  "0%",
+        "Edge-Cloud": _offload_ratio("edge_cloud"),
+    })
+
+    # Add bandwidth savings row
+    co_bw = dfs["cloud_only"]["uploaded_bytes"].sum() if "cloud_only" in dfs else 0
+    ec_bw = dfs["edge_cloud"]["uploaded_bytes"].sum() if "edge_cloud" in dfs else 0
+    bw_savings = f"{(co_bw - ec_bw) / co_bw * 100:.1f}%" if co_bw > 0 else "—"
+    rows.append({
+        "Metric": "Bandwidth Savings vs Cloud-Only",
+        "Cloud-Only": "0%",
+        "Edge-Only":  "100%",
+        "Edge-Cloud": bw_savings,
+    })
+
+    result_df = pd.DataFrame(rows)
+    st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+    # ── Download button ───────────────────────────────────────────────────────
+    csv_export = result_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download Table as CSV",
+        data=csv_export,
+        file_name="experiment_results_table53.csv",
+        mime="text/csv",
+    )
+
+    # ── Charts ────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Visual Summary")
+
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        # Latency comparison
+        lat_rows = []
+        for key in ["cloud_only", "edge_only", "edge_cloud"]:
+            if key in dfs and "latency_ms" in dfs[key].columns:
+                lat_rows.append({
+                    "Scenario": SCENARIO_LABELS[key],
+                    "Avg Latency (ms)": dfs[key]["latency_ms"].mean(),
+                    "P95 Latency (ms)": _compute_p95(dfs[key]["latency_ms"].dropna().tolist()),
+                })
+        if lat_rows:
+            lat_df = pd.DataFrame(lat_rows)
+            fig_lat = px.bar(
+                lat_df.melt(id_vars="Scenario", var_name="Metric", value_name="ms"),
+                x="Scenario", y="ms", color="Metric", barmode="group",
+                title="Latency Comparison (ms)",
+                color_discrete_sequence=["#636EFA", "#EF553B"],
+            )
+            st.plotly_chart(fig_lat, use_container_width=True)
+
+    with chart_col2:
+        # Bandwidth comparison
+        bw_rows = []
+        for key in ["cloud_only", "edge_only", "edge_cloud"]:
+            if key in dfs and "uploaded_bytes" in dfs[key].columns:
+                bw_rows.append({
+                    "Scenario": SCENARIO_LABELS[key],
+                    "Total Upload (bytes)": int(dfs[key]["uploaded_bytes"].sum()),
+                })
+        if bw_rows:
+            fig_bw = px.bar(
+                pd.DataFrame(bw_rows),
+                x="Scenario", y="Total Upload (bytes)",
+                color="Scenario",
+                color_discrete_map={SCENARIO_LABELS[k]: v for k, v in COLORS.items()},
+                title="Total Upload Bandwidth (bytes)",
+                text_auto=True,
+            )
+            st.plotly_chart(fig_bw, use_container_width=True)
+
+    # Confidence comparison
+    conf_rows = []
+    for key in ["cloud_only", "edge_only", "edge_cloud"]:
+        if key in dfs and "confidence" in dfs[key].columns:
+            conf_rows.append({
+                "Scenario": SCENARIO_LABELS[key],
+                "Avg Confidence": dfs[key]["confidence"].mean(),
+            })
+    if conf_rows:
+        fig_conf = px.bar(
+            pd.DataFrame(conf_rows),
+            x="Scenario", y="Avg Confidence",
+            color="Scenario",
+            color_discrete_map={SCENARIO_LABELS[k]: v for k, v in COLORS.items()},
+            title="Average Confidence Score",
+            text_auto=".4f",
+            range_y=[0, 1],
+        )
+        st.plotly_chart(fig_conf, use_container_width=True)
+
+    # ── Per-image raw data ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Raw Data per Image")
+    selected_scenario = st.selectbox(
+        "Select scenario to inspect",
+        options=list(dfs.keys()),
+        format_func=lambda x: SCENARIO_LABELS.get(x, x),
+    )
+    if selected_scenario in dfs:
+        st.dataframe(dfs[selected_scenario], use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
 
@@ -873,11 +1142,12 @@ def main() -> None:
     # ── Sidebar navigation ──────────────────────────────────────────────────
     page = st.sidebar.radio(
         "Navigation",
-        options=["single_image", "comparison", "demo_cases", "video"],
+        options=["single_image", "comparison", "demo_cases", "experiment_results", "video"],
         format_func=lambda x: {
             "single_image": "🖼️ Single Image Analysis",
             "comparison": "📊 Scenario Comparison",
             "demo_cases": "🧪 Demo Cases",
+            "experiment_results": "📋 Experiment Results",
             "video": "🎬 Video Analysis",
         }[x],
     )
@@ -932,12 +1202,79 @@ def main() -> None:
     st.sidebar.markdown(f"**Cloud URL:** `{CLOUD_URL}`")
     st.sidebar.markdown(f"**Edge URL:** `{EDGE_URL}`")
 
+    # ── Dataset management ───────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📦 Dataset")
+    dataset_dir = os.environ.get("DATASET_DIR", "dataset")
+    img_count = sum(
+        len([f for f in os.listdir(os.path.join(dataset_dir, "images", d))
+             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
+        for d in ("easy", "medium", "hard")
+        if os.path.isdir(os.path.join(dataset_dir, "images", d))
+    ) if os.path.isdir(os.path.join(dataset_dir, "images")) else 0
+
+    if img_count > 0:
+        st.sidebar.success(f"✅ {img_count} images available")
+    else:
+        st.sidebar.warning("⚠️ No images found")
+
+    if st.sidebar.button("⬇️ Download Test Dataset", help="Download 30 sample images (10 per difficulty level)"):
+        with st.sidebar.status("Downloading...", expanded=True) as status:
+            try:
+                import urllib.request
+                # Use verified picsum.photos IDs that are known to exist
+                SAMPLE_URLS = {
+                    "easy":   [
+                        (f"https://picsum.photos/seed/easy{i}/640/480", f"easy_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
+                    "medium": [
+                        (f"https://picsum.photos/seed/medium{i}/640/480", f"medium_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
+                    "hard":   [
+                        (f"https://picsum.photos/seed/hard{i}/640/480", f"hard_{i+1:03d}.jpg")
+                        for i in range(10)
+                    ],
+                }
+                downloaded = 0
+                failed = 0
+                for difficulty, images in SAMPLE_URLS.items():
+                    out_dir = os.path.join(dataset_dir, "images", difficulty)
+                    os.makedirs(out_dir, exist_ok=True)
+                    for url, fname in images:
+                        out_path = os.path.join(out_dir, fname)
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                            st.write(f"⏭ {difficulty}/{fname} (already exists)")
+                            downloaded += 1
+                            continue
+                        try:
+                            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                data = resp.read()
+                            with open(out_path, "wb") as f:
+                                f.write(data)
+                            st.write(f"✓ {difficulty}/{fname} ({len(data):,} bytes)")
+                            downloaded += 1
+                        except Exception as e:
+                            st.write(f"⚠ {difficulty}/{fname}: {e}")
+                            failed += 1
+                            continue
+                if failed == 0:
+                    status.update(label=f"✅ Downloaded {downloaded} images", state="complete")
+                else:
+                    status.update(label=f"⚠️ {downloaded} ok, {failed} failed", state="complete")
+            except Exception as exc:
+                status.update(label=f"❌ Error: {exc}", state="error")
+
     if page == "single_image":
         page_single_image(threshold, threshold_avg, object_threshold)
     elif page == "comparison":
         page_comparison()
     elif page == "demo_cases":
         page_demo_cases(threshold, threshold_avg, object_threshold)
+    elif page == "experiment_results":
+        page_experiment_results()
     else:
         page_video(threshold, threshold_avg, object_threshold)
 

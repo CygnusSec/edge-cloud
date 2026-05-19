@@ -54,8 +54,9 @@ services:
       - RESULTS_DIR=/app/results
       - DATASET_DIR=/app/dataset
     volumes:
-      - ./results:/app/results:ro
-      - ./dataset:/app/dataset:ro
+      - ./results:/app/results:rw
+      - ./dataset:/app/dataset:rw
+      - ./edge:/app/edge:ro
     networks:
       - edge_cloud_net
     depends_on:
